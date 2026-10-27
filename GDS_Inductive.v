@@ -132,3 +132,22 @@ Record total_state := {
     current_class: nat; (*Index of the current class*)
     class_states: list class_state (*List of all class states*)
     }.
+
+
+Inductive eval_expr : class_state -> valuation -> expr -> value -> Prop :=
+  | NatConst : forall cs val n, 
+      eval_expr cs val (nConst n) (Nat n)
+  | BoolConst : forall cs val b, 
+      eval_expr cs val (bConst b) (Bool b)
+  | VarLookupLocal : forall cs val x v,
+      val x = Some v ->
+      eval_expr cs val (Var x) v
+  | VarLookupGlobal : forall cs val x v,
+      val x = None -> 
+      global_store cs x = Some v ->
+      eval_expr cs val (Var x) v
+  | BinopEval : forall cs val b e1 e2 v1 v2 v,
+      eval_expr cs val e1 v1 ->
+      eval_expr cs val e2 v2 ->
+      interp_binop b v1 v2 = Some v ->
+      eval_expr cs val (Binop b e1 e2) v.
