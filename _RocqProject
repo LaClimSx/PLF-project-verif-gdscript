@@ -1,3 +1,5 @@
 CompMap.v
 GDS_Language.v
 GDS_Testing.v
+GDS_Inductive.v
+Valuation.v
