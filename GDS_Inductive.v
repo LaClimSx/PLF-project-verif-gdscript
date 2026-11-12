@@ -1,7 +1,9 @@
 From Stdlib Require Import String Bool.
 From Stdlib Require Export NArith Arith.
 From Stdlib Require Import List.
+Import ListNotations.
 Require Import Valuation.
+Open Scope list_scope.
 
 
 Inductive BinopName :=
@@ -26,6 +28,10 @@ Coercion bConst : bool >-> expr.
 Coercion Var : string >-> expr.
 
 Inductive value := Nat (n : nat) | Bool (b : bool).
+
+Definition value_to_option (v : value) : option value := Some v.
+Coercion value_to_option : value >-> option.
+(*NB: J'ai ajouté ça pour qu'on puisse update des valuations sans donner des options, pas sur que ce soit la meilleure idée, à voir*)
 
 
 Definition interp_binop (b: BinopName) (v1 v2: value) : option value :=
@@ -57,6 +63,17 @@ Inductive stmt :=
 | emitSignal : string -> list expr -> stmt (*Signal name, args*)
 | sequence : stmt -> stmt -> stmt (*s1; s2*)
 .
+
+Inductive topLvl :=
+| skip: topLvl
+| classVarDecl: string -> expr -> topLvl (*Var name, value*)
+| signalDecl : string -> list string -> topLvl (*Signal name, List of argument names*)
+| methodDecl : string -> list string -> option string -> stmt -> topLvl (*Method name, arg names, optional return var name, body*)
+| readyDecl : stmt -> topLvl (*Body*)
+| processDecl : stmt -> topLvl (*Body*)
+| sequenceTop : topLvl -> topLvl -> topLvl (*t1; t2*) 
+.
+
 
 Declare Custom Entry gds.
 Declare Scope gds_scope.
@@ -109,6 +126,41 @@ Notation "'emit' sig ( a , .. , b )" := (emitSignal sig (@cons expr a .. (@cons 
 
 Notation "s1 ; s2" := (sequence s1 s2) (in custom gds at level 90, right associativity) : gds_scope.
 
+(* Top-level declarations: separate entry, so that "var x := e" and ";"
+   do not clash with their statement counterparts *)
+Declare Custom Entry gds_top.
+
+
+Notation "<[ t ]>" := t (t custom gds_top at level 99) : gds_scope.
+Notation "( t )" := t (in custom gds_top, t at level 99) : gds_scope.
+Notation "t" := t (in custom gds_top at level 0, t constr at level 0) : gds_scope.
+ 
+Notation "'skip'" := skip (in custom gds_top at level 0) : gds_scope.
+Notation "'var' x ':=' e" := (classVarDecl x e)
+  (in custom gds_top at level 0, x constr at level 0, e custom gds at level 85, no associativity) : gds_scope.
+ 
+Notation "'signal' sig ()" := (signalDecl sig (@nil string))
+  (in custom gds_top at level 0, sig constr at level 0) : gds_scope.
+Notation "'signal' sig ( a , .. , b )" := (signalDecl sig (@cons string a .. (@cons string b nil) ..))
+  (in custom gds_top at level 0, sig constr at level 0, a constr at level 0, b constr at level 0) : gds_scope.
+ 
+Notation "'func' m () 'do' s 'end'" := (methodDecl m (@nil string) None s)
+  (in custom gds_top at level 0, m constr at level 0, s custom gds at level 99) : gds_scope.
+Notation "'func' m ( a , .. , b ) 'do' s 'end'" := (methodDecl m (@cons string a .. (@cons string b nil) ..) None s)
+  (in custom gds_top at level 0, m constr at level 0, a constr at level 0, b constr at level 0, s custom gds at level 99) : gds_scope.
+Notation "'func' m () '->' r 'do' s 'end'" := (methodDecl m (@nil string) (Some r) s)
+  (in custom gds_top at level 0, m constr at level 0, r constr at level 0, s custom gds at level 99) : gds_scope.
+Notation "'func' m ( a , .. , b ) '->' r 'do' s 'end'" := (methodDecl m (@cons string a .. (@cons string b nil) ..) (Some r) s)
+  (in custom gds_top at level 0, m constr at level 0, a constr at level 0, b constr at level 0, r constr at level 0, s custom gds at level 99) : gds_scope.
+ 
+Notation "'ready' 'do' s 'end'" := (readyDecl s)
+  (in custom gds_top at level 0, s custom gds at level 99) : gds_scope.
+Notation "'process' 'do' s 'end'" := (processDecl s)
+  (in custom gds_top at level 0, s custom gds at level 99) : gds_scope.
+ 
+Notation "t1 ; t2" := (sequenceTop t1 t2) (in custom gds_top at level 90, right associativity) : gds_scope.
+
+
 Definition valuation := partial_map value.
 
 (*
@@ -127,6 +179,56 @@ Record class_state := {
     waiting_bodies: partial_map (list (stmt * valuation)); (*Store for waiting bodies with their associated local valuations *)
     signal_bindings: partial_map (list string) (*Store for signal bindings from signal name to list of bound method names*)
     }.
+
+Definition empty_cs: class_state := {|
+    global_store := empty;
+    method_store := empty;
+    signal_store := empty;
+    waiting_bodies := empty;
+    signal_bindings := empty
+|}.
+
+
+Definition update_gs (cs: class_state) (x: string) (v: value) : class_state :=
+  {| global_store := (global_store cs)[x := v];
+     method_store := method_store cs;
+     signal_store := signal_store cs;
+     waiting_bodies := waiting_bodies cs;
+     signal_bindings := signal_bindings cs |}.
+
+Definition update_method_store (cs: class_state) (name: string) (params: list string) (ret: option string) (body: stmt) : class_state :=
+  {| global_store := global_store cs;
+     method_store := (method_store cs)[name := Some (params, ret, body)];
+     signal_store := signal_store cs;
+     waiting_bodies := waiting_bodies cs;
+     signal_bindings := signal_bindings cs |}.
+
+Definition update_signal_store (cs: class_state) (name: string) (params: list string) : class_state :=
+  {| global_store := global_store cs;
+     method_store := method_store cs;
+     signal_store := (signal_store cs)[name := Some params];
+     waiting_bodies := waiting_bodies cs;
+     signal_bindings := signal_bindings cs |}.
+
+
+Definition update_waiting_bodies
+    (cs: class_state) (name: string) (body: stmt * valuation): class_state :=
+  let bodies := match waiting_bodies cs name with Some l => l | None => [] end in
+  {| global_store := global_store cs;
+     method_store := method_store cs;
+     signal_store := signal_store cs;
+     waiting_bodies := (waiting_bodies cs)[name := Some (bodies ++ [body])];
+     signal_bindings := signal_bindings cs |}.
+
+Definition update_signal_bindings
+    (cs: class_state) (name: string) (method_name: string): class_state :=
+  let methods := match signal_bindings cs name with Some l => l | None => [] end in
+  {| global_store := global_store cs;
+     method_store := method_store cs;
+     signal_store := signal_store cs;
+     waiting_bodies := waiting_bodies cs;
+     signal_bindings := (signal_bindings cs)[name := Some (methods ++ [method_name])] |}.
+
 
 Record total_state := {
     current_class: nat; (*Index of the current class*)
@@ -151,3 +253,22 @@ Inductive eval_expr : class_state -> valuation -> expr -> value -> Prop :=
       eval_expr cs val e2 v2 ->
       interp_binop b v1 v2 = Some v ->
       eval_expr cs val (Binop b e1 e2) v.
+
+
+Inductive eval_stmt : class_state -> valuation -> stmt -> class_state * valuation -> Prop :=
+| Pass: forall cs val,
+  eval_stmt cs val pass (cs, val)
+| VarDecl: forall x cs val e v,
+  val x = None ->
+  eval_expr cs val e v ->
+  eval_stmt cs val (varDecl x e) (cs, val[x := v])
+| AssignL: forall x cs val e v v',
+  val x = Some v' ->
+  eval_expr cs val e v ->
+  eval_stmt cs val (assign x e) (cs, val[x := v])
+| AssignG: forall x cs val e v v',
+  val x = None ->
+  global_store cs x = Some v' ->
+  eval_expr cs val e v ->
+  eval_stmt cs val (assign x e) (update_gs cs x v, val) 
+.
