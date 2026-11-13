@@ -465,3 +465,83 @@ Inductive multi : class_state -> valuation -> stmt -> class_state -> valuation -
     step cs val s cs' val' s' ->
     multi cs' val' s' cs'' val'' s'' ->
     multi cs val s cs'' val'' s''.
+
+
+(* Initialization of a class (big-step: declarations always end)   
+  init cs t cs' ready process                                      
+  Declares variables, signals and methods, and extracts the bodies
+  of ready and process without running them. *)
+
+(* Combines what two parts of a class declare for ready (or process):
+   None if both declare one *)
+Definition merge_opt (o1 o2 : option stmt) : option (option stmt) :=
+  match o1, o2 with
+  | Some _, Some _ => None
+  | Some s, None | None, Some s => Some (Some s)
+  | None, None => Some None
+  end.
+
+Inductive init : class_state -> topLvl -> class_state -> option stmt -> option stmt -> Prop :=
+| I_Skip : forall cs,
+    init cs skip cs None None
+| I_ClassVarDecl : forall cs x e v,
+    global_store cs x = None ->
+    eval_expr cs empty e v ->
+    init cs (classVarDecl x e) (update_gs cs x v) None None
+| I_SignalDecl : forall cs sig params,
+    signal_store cs sig = None ->
+    init cs (signalDecl sig params) (update_signal_store cs sig params) None None
+| I_MethodDecl : forall cs f params ret body,
+    method_store cs f = None ->
+    init cs (methodDecl f params ret body) (update_method_store cs f params ret body) None None
+| I_ReadyDecl : forall cs s,
+    init cs (readyDecl s) cs (Some s) None
+| I_ProcessDecl : forall cs s,
+    init cs (processDecl s) cs None (Some s)
+| I_Seq : forall cs t1 t2 cs1 cs2 r1 p1 r2 p2 r p,
+    init cs t1 cs1 r1 p1 ->
+    init cs1 t2 cs2 r2 p2 ->
+    merge_opt r1 r2 = Some r ->
+    merge_opt p1 p2 = Some p ->
+    init cs (sequenceTop t1 t2) cs2 r p.
+
+
+(*  Execution of a class (small-step)                                 
+    A configuration is the class state, the code currently running,   
+    and the number of process frames still to run. The process body   
+    never changes, so it is a parameter of the relation. *)
+Record config := {
+    c_state : class_state; (*State of the class*)
+    c_code : stmt;         (*Code currently running (pass when idle)*)
+    c_frames : nat         (*Number of process frames still to run*)
+    }.
+
+Definition body_or_pass (o : option stmt) : stmt :=
+  match o with Some s => s | None => pass end.
+
+Inductive pstep (process : option stmt) : config -> config -> Prop :=
+(* The running code takes one step. All top-level code runs inside a frame,
+   so the outer local store stays empty. *)
+| P_Step : forall cs s cs' s' n,
+    step cs empty s cs' empty s' ->
+    pstep process {| c_state := cs; c_code := s; c_frames := n |}
+                  {| c_state := cs'; c_code := s'; c_frames := n |}
+(* The current code is finished: start the next process frame
+   (an empty frame if the class has no process) *)
+| P_NextFrame : forall cs n,
+    pstep process {| c_state := cs; c_code := pass; c_frames := S n |}
+                  {| c_state := cs; c_code := frame empty (body_or_pass process); c_frames := n |}.
+
+Inductive pmulti (process : option stmt) : config -> config -> Prop :=
+| PM_Refl : forall c, pmulti process c c
+| PM_Step : forall c c' c'',
+    pstep process c c' -> pmulti process c' c'' -> pmulti process c c''.
+
+(* Whole class: initialization, then ready, then n process frames.
+   The class has finished when its code is pass and no frame is left. *)
+Inductive eval_class : nat -> topLvl -> class_state -> Prop :=
+| Eval : forall n t cs cs' ready process,
+    init empty_cs t cs ready process ->
+    pmulti process {| c_state := cs; c_code := frame empty (body_or_pass ready); c_frames := n |}
+                   {| c_state := cs'; c_code := pass; c_frames := 0 |} ->
+    eval_class n t cs'.
