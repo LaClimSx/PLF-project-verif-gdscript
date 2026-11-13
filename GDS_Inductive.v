@@ -71,7 +71,7 @@ Inductive stmt :=
 | sequence : stmt -> stmt -> stmt (*s1; s2*)
 (* Internal statements: never written in source programs, only produced by the semantics *)
 | endScope : list string -> stmt (*End of an if/while block: removes the locals the block declared*)
-| frame : valuation -> stmt -> stmt (*Code running with its own local store (method body, woken body)*)
+| frame : nat -> valuation -> stmt -> stmt (*Class index, local store, code: runs in the context of that class (method body, woken body, ready, process)*)
 | retFrame : ret_target -> string -> valuation -> stmt -> stmt (*Target, return variable name, local store, body*)
 .
 
@@ -178,16 +178,17 @@ Notation "t1 ; t2" := (sequenceTop t1 t2) (in custom gds_top at level 90, right 
     the global store = valuation 
     The method store = map from string to (list string, option string, statement)
     The signal store = map from string to list string 
-    The lists of waiting bodies per signal = map from string to list of (statement, valuation) 
-    The lists of signal bindings  = map from string to list of string 
+    The lists of waiting bodies per signal = map from string to list of (class index, statement, valuation) 
+    The lists of signal bindings  = map from string to list of (class index, method name) 
+    (the class index says in which class the body / method runs)
 
 *)
 Record class_state := {
     global_store: valuation; (*Store for variables*)
     method_store: partial_map ((list string) * option string * stmt); (*Store for methods, with parameter names, optional return variable name, and body*)
     signal_store: partial_map (list string); (*Store for signals, with parameter names *)
-    waiting_bodies: partial_map (list (stmt * valuation)); (*Store for waiting bodies with their associated local valuations *)
-    signal_bindings: partial_map (list string) (*Store for signal bindings from signal name to list of bound method names*)
+    waiting_bodies: partial_map (list (nat * stmt * valuation)); (*Store for waiting bodies, with the index of their class and their local valuation *)
+    signal_bindings: partial_map (list (nat * string)) (*Store for signal bindings from signal name to list of bound methods (class index, method name)*)
     }.
 
 Definition empty_cs: class_state := {|
@@ -199,7 +200,8 @@ Definition empty_cs: class_state := {|
 |}.
 
 
-(*Helper functions for updating class state*)
+(*Helper functions for updating class state*) 
+(* -----------HELPER------------------*)
 
 Definition update_gs (cs: class_state) (x: string) (v: value) : class_state :=
   {| global_store := (global_store cs)[x := v];
@@ -224,7 +226,7 @@ Definition update_signal_store (cs: class_state) (name: string) (params: list st
 
 
 Definition update_waiting_bodies
-    (cs: class_state) (name: string) (body: stmt * valuation): class_state :=
+    (cs: class_state) (name: string) (body: nat * stmt * valuation): class_state :=
   let bodies := match waiting_bodies cs name with Some l => l | None => [] end in
   {| global_store := global_store cs;
      method_store := method_store cs;
@@ -233,7 +235,7 @@ Definition update_waiting_bodies
      signal_bindings := signal_bindings cs |}.
 
 Definition update_signal_bindings
-    (cs: class_state) (name: string) (method_name: string): class_state :=
+    (cs: class_state) (name: string) (method_name: nat * string): class_state :=
   let methods := match signal_bindings cs name with Some l => l | None => [] end in
   {| global_store := global_store cs;
      method_store := method_store cs;
@@ -250,10 +252,18 @@ Definition clear_waiting_bodies (cs: class_state) (name: string) : class_state :
      signal_bindings := signal_bindings cs |}.
 
 
-Record total_state := {
-    current_class: nat; (*Index of the current class*)
-    class_states: list class_state (*List of all class states*)
-    }.
+
+(* The states of all classes of the program; a class is identified by its
+   index in this list *)
+Definition world := list class_state.
+
+(* Replaces the n-th element of a list (unchanged if n is out of range) *)
+Fixpoint replace_nth {A} (l : list A) (n : nat) (x : A) : list A :=
+  match l, n with
+  | [], _ => []
+  | _ :: l', 0 => x :: l'
+  | y :: l', S n' => y :: replace_nth l' n' x
+  end.
 
 
 (*Evaluate an expression to a value*)
@@ -277,6 +287,7 @@ Inductive eval_expr : class_state -> valuation -> expr -> value -> Prop :=
 
 
 (*  Auxiliary functions for the small-step semantics  *)
+(*-----------------------------------------------------*)
 
 Definition value_to_expr (v : value) : expr :=
   match v with
@@ -326,25 +337,31 @@ Fixpoint bind_args (params : list string) (vs : list value) : option valuation :
 Definition list_or_nil {A} (o : option (list A)) : list A :=
   match o with Some l => l | None => [] end.
 
-(* One frame per method bound to a signal, in binding order.
-   None if a method does not exist or has the wrong arity. *)
-Fixpoint method_frames (cs : class_state) (ms : list string) (vs : list value) : option stmt :=
+(* One frame per method bound to a signal, in binding order, each in the
+   context of the class the method belongs to.
+   None if a class or a method does not exist, or if the arity is wrong. *)
+Fixpoint method_frames (w : world) (ms : list (nat * string)) (vs : list value) : option stmt :=
   match ms with
   | [] => Some pass
-  | m :: ms' =>
-      match method_store cs m, method_frames cs ms' vs with
-      | Some (params, _, body), Some rest =>
-          match bind_args params vs with
-          | Some valf => Some (sequence (frame valf body) rest)
-          | None => None
+  | (cm, m) :: ms' =>
+      match nth_error w cm with
+      | None => None
+      | Some csm =>
+          match method_store csm m, method_frames w ms' vs with
+          | Some (params, _, body), Some rest =>
+              match bind_args params vs with
+              | Some valf => Some (sequence (frame cm valf body) rest)
+              | None => None
+              end
+          | _, _ => None
           end
-      | _, _ => None
       end
   end.
 
-(* One frame per waiting body, in FIFO order, each with its saved local store *)
-Definition waiting_frames (ws : list (stmt * valuation)) : stmt :=
-  fold_right (fun '(k, valk) acc => sequence (frame valk k) acc) pass ws.
+(* One frame per waiting body, in FIFO order, each in the context of its
+   class and with its saved local store *)
+Definition waiting_frames (ws : list (nat * stmt * valuation)) : stmt :=
+  fold_right (fun '(ck, k, valk) acc => sequence (frame ck valk k) acc) pass ws.
 
 (* What the caller executes once the callee has returned value v *)
 Definition ret_stmt (t : ret_target) (v : value) : stmt :=
@@ -354,123 +371,147 @@ Definition ret_stmt (t : ret_target) (v : value) : stmt :=
   end.
 
 
-(* ================================================================== *)
-(*  Small-step semantics of statements                                *)
-(*  step cs val s cs' val' s'  :  <cs, val, s> --> <cs', val', s'>    *)
-(*  A statement is finished when it is pass (pass never steps).       *)
-(* ================================================================== *)
+(*  Small-step semantics of statements                                
+    step w c val s w' val' s'  :  <w, c, val, s> --> <w', val', s'>   
+    w is the state of all classes, c the index of the class whose      
+    context the code runs in (globals, methods, signals), val the      
+    local store of the enclosing frame.                               
+    A statement is finished when it is pass (pass never steps).     *)
+ (*-------------------------STEP RELATION-----------------------------------*)
 
-Inductive step : class_state -> valuation -> stmt -> class_state -> valuation -> stmt -> Prop :=
+Inductive step : world -> nat -> valuation -> stmt -> world -> valuation -> stmt -> Prop :=
 (* Variables *)
-| S_VarDecl : forall cs val x e v,
+| S_VarDecl : forall w c cs val x e v,
+    nth_error w c = Some cs ->
     val x = None ->
     eval_expr cs val e v ->
-    step cs val (varDecl x e) cs (val [x := v]) pass
-| S_AssignL : forall cs val x e v v',
+    step w c val (varDecl x e) w (val [x := v]) pass
+| S_AssignL : forall w c cs val x e v v',
+    nth_error w c = Some cs ->
     val x = Some v' ->
     eval_expr cs val e v ->
-    step cs val (assign x e) cs (val [x := v]) pass
-| S_AssignG : forall cs val x e v v',
+    step w c val (assign x e) w (val [x := v]) pass
+| S_AssignG : forall w c cs val x e v v',
+    nth_error w c = Some cs ->
     val x = None ->
     global_store cs x = Some v' ->
     eval_expr cs val e v ->
-    step cs val (assign x e) (update_gs cs x v) val pass
+    step w c val (assign x e) (replace_nth w c (update_gs cs x v)) val pass
 
 (* Sequence *)
-| S_SeqPass : forall cs val s2,
-    step cs val (sequence pass s2) cs val s2
-| S_Seq : forall cs val s1 s1' s2 cs' val',
-    step cs val s1 cs' val' s1' ->
-    step cs val (sequence s1 s2) cs' val' (sequence s1' s2)
+| S_SeqPass : forall w c val s2,
+    step w c val (sequence pass s2) w val s2
+| S_Seq : forall w c val s1 s1' s2 w' val',
+    step w c val s1 w' val' s1' ->
+    step w c val (sequence s1 s2) w' val' (sequence s1' s2)
 
 (* Blocks: each branch / loop body is followed by an endScope that removes its locals *)
-| S_IfT : forall cs val e s1 s2,
+| S_IfT : forall w c cs val e s1 s2,
+    nth_error w c = Some cs ->
     eval_expr cs val e (Bool true) ->
-    step cs val (ifThenElse e s1 s2) cs val (sequence s1 (endScope (decls s1)))
-| S_IfF : forall cs val e s1 s2,
+    step w c val (ifThenElse e s1 s2) w val (sequence s1 (endScope (decls s1)))
+| S_IfF : forall w c cs val e s1 s2,
+    nth_error w c = Some cs ->
     eval_expr cs val e (Bool false) ->
-    step cs val (ifThenElse e s1 s2) cs val (sequence s2 (endScope (decls s2)))
-| S_WhileT : forall cs val e s,
+    step w c val (ifThenElse e s1 s2) w val (sequence s2 (endScope (decls s2)))
+| S_WhileT : forall w c cs val e s,
+    nth_error w c = Some cs ->
     eval_expr cs val e (Bool true) ->
-    step cs val (whileLoop e s) cs val
+    step w c val (whileLoop e s) w val
          (sequence (sequence s (endScope (decls s))) (whileLoop e s))
-| S_WhileF : forall cs val e s,
+| S_WhileF : forall w c cs val e s,
+    nth_error w c = Some cs ->
     eval_expr cs val e (Bool false) ->
-    step cs val (whileLoop e s) cs val pass
-| S_EndScope : forall cs val xs,
-    step cs val (endScope xs) cs (remove_vars xs val) pass
+    step w c val (whileLoop e s) w val pass
+| S_EndScope : forall w c val xs,
+    step w c val (endScope xs) w (remove_vars xs val) pass
 
-(* Method calls: the body runs in a frame with its own local store *)
-| S_Call : forall cs val f args vs params ret body valf,
+(* Method calls (always to a method of the current class): the body runs in
+   a frame of the current class with its own local store *)
+| S_Call : forall w c cs val f args vs params ret body valf,
+    nth_error w c = Some cs ->
     method_store cs f = Some (params, ret, body) ->
     Forall2 (eval_expr cs val) args vs ->
     bind_args params vs = Some valf ->
-    step cs val (callMethod f args) cs val (frame valf body)
-| S_AssignCall : forall cs val x f args vs params r body valf,
+    step w c val (callMethod f args) w val (frame c valf body)
+| S_AssignCall : forall w c cs val x f args vs params r body valf,
+    nth_error w c = Some cs ->
     method_store cs f = Some (params, Some r, body) ->
     Forall2 (eval_expr cs val) args vs ->
     bind_args params vs = Some valf ->
-    step cs val (assignCallMethod x f args) cs val (retFrame (ToAssign x) r valf body)
-| S_DeclCall : forall cs val x f args vs params r body valf,
+    step w c val (assignCallMethod x f args) w val (retFrame (ToAssign x) r valf body)
+| S_DeclCall : forall w c cs val x f args vs params r body valf,
+    nth_error w c = Some cs ->
     method_store cs f = Some (params, Some r, body) ->
     Forall2 (eval_expr cs val) args vs ->
     bind_args params vs = Some valf ->
-    step cs val (declCallMethod x f args) cs val (retFrame (ToDecl x) r valf body)
+    step w c val (declCallMethod x f args) w val (retFrame (ToDecl x) r valf body)
 
-(* Frames: the inner code steps with the frame's local store; the outer one is untouched *)
-| S_Frame : forall cs val valf s cs' valf' s',
-    step cs valf s cs' valf' s' ->
-    step cs val (frame valf s) cs' val (frame valf' s')
-| S_FrameDone : forall cs val valf,
-    step cs val (frame valf pass) cs val pass
-(* await at the head of a frame: the rest of the frame and its local store are
-   stored as a waiting body, and the frame ends (the caller continues).
-   Only signals of the current class (index 0) for now. *)
-| S_FrameAwait : forall cs val valf s sig k,
-    head_await s = Some (sig, 0, k) ->
-    step cs val (frame valf s) (update_waiting_bodies cs sig (k, valf)) val pass
+(* Frames: context switch. The inner code steps in the context of the frame's
+   class cf, with the frame's local store; the outer context is untouched. *)
+| S_Frame : forall w c val cf valf s w' valf' s',
+    step w cf valf s w' valf' s' ->
+    step w c val (frame cf valf s) w' val (frame cf valf' s')
+| S_FrameDone : forall w c val cf valf,
+    step w c val (frame cf valf pass) w val pass
+(* await at the head of a frame of class cf, on a signal of class n: the rest
+   of the frame is stored in the waiting list of class n, tagged with cf (it
+   will run in the context of cf when woken), and the frame ends. *)
+| S_FrameAwait : forall w c val cf valf s sig n k csn,
+    head_await s = Some (sig, n, k) ->
+    nth_error w n = Some csn ->
+    step w c val (frame cf valf s)
+         (replace_nth w n (update_waiting_bodies csn sig (cf, k, valf))) val pass
 
-(* Frames of calls with a return value. No await rule: a method with a return
-   value that awaits is stuck (to be ruled out by the type system). *)
-| S_RetFrame : forall cs val t r valf s cs' valf' s',
-    step cs valf s cs' valf' s' ->
-    step cs val (retFrame t r valf s) cs' val (retFrame t r valf' s')
-| S_RetDone : forall cs val t r valf v,
+(* Frames of calls with a return value (same class as the caller). No await
+   rule: a method with a return value that awaits is stuck (to be ruled out
+   by the type system). *)
+| S_RetFrame : forall w c val t r valf s w' valf' s',
+    step w c valf s w' valf' s' ->
+    step w c val (retFrame t r valf s) w' val (retFrame t r valf' s')
+| S_RetDone : forall w c val t r valf v,
     valf r = Some v ->
-    step cs val (retFrame t r valf pass) cs val (ret_stmt t v)
+    step w c val (retFrame t r valf pass) w val (ret_stmt t v)
 
 (* Signals *)
-| S_Bind : forall cs val f sig m params,
+(* bind f sig n: method f of the current class c is bound to signal sig of class n *)
+| S_Bind : forall w c cs val f sig n csn m params,
+    nth_error w c = Some cs ->
+    nth_error w n = Some csn ->
     method_store cs f = Some m ->
-    signal_store cs sig = Some params ->
-    step cs val (bind f sig 0) (update_signal_bindings cs sig f) val pass
-(* emit: the waiting list is emptied first (bodies that await again during
-   the emission wait for the next one), then the bound methods run, then the
-   bodies that were waiting, each in its own frame *)
-| S_Emit : forall cs val sig args vs params calls,
+    signal_store csn sig = Some params ->
+    step w c val (bind f sig n)
+         (replace_nth w n (update_signal_bindings csn sig (c, f))) val pass
+(* emit: a class only emits its own signals. The waiting list is emptied
+   first (bodies that await again during the emission wait for the next one),
+   then the bound methods run, then the bodies that were waiting, each in a
+   frame of its own class *)
+| S_Emit : forall w c cs val sig args vs params calls,
+    nth_error w c = Some cs ->
     signal_store cs sig = Some params ->
     Forall2 (eval_expr cs val) args vs ->
     length params = length vs ->
-    method_frames cs (list_or_nil (signal_bindings cs sig)) vs = Some calls ->
-    step cs val (emitSignal sig args)
-         (clear_waiting_bodies cs sig) val
+    method_frames w (list_or_nil (signal_bindings cs sig)) vs = Some calls ->
+    step w c val (emitSignal sig args)
+         (replace_nth w c (clear_waiting_bodies cs sig)) val
          (sequence calls (waiting_frames (list_or_nil (waiting_bodies cs sig)))).
 
 
-(* Reflexive-transitive closure: <cs, val, s> -->* <cs', val', s'> *)
-Inductive multi : class_state -> valuation -> stmt -> class_state -> valuation -> stmt -> Prop :=
-| M_Refl : forall cs val s,
-    multi cs val s cs val s
-| M_Step : forall cs val s cs' val' s' cs'' val'' s'',
-    step cs val s cs' val' s' ->
-    multi cs' val' s' cs'' val'' s'' ->
-    multi cs val s cs'' val'' s''.
+(* Reflexive-transitive closure: <w, c, val, s> -->* <w', val', s'> *)
+Inductive multi : world -> nat -> valuation -> stmt -> world -> valuation -> stmt -> Prop :=
+| M_Refl : forall w c val s,
+    multi w c val s w val s
+| M_Step : forall w c val s w' val' s' w'' val'' s'',
+    step w c val s w' val' s' ->
+    multi w' c val' s' w'' val'' s'' ->
+    multi w c val s w'' val'' s''.
 
 
 (* Initialization of a class (big-step: declarations always end)   
   init cs t cs' ready process                                      
   Declares variables, signals and methods, and extracts the bodies
   of ready and process without running them. *)
+  (*-----------------------------------------------------------*)
 
 (* Combines what two parts of a class declare for ready (or process):
    None if both declare one *)
@@ -506,42 +547,66 @@ Inductive init : class_state -> topLvl -> class_state -> option stmt -> option s
     init cs (sequenceTop t1 t2) cs2 r p.
 
 
-(*  Execution of a class (small-step)                                 
-    A configuration is the class state, the code currently running,   
-    and the number of process frames still to run. The process body   
-    never changes, so it is a parameter of the relation. *)
+(* Initialization of all classes, in order. Each class is initialized
+   independently, from an empty state. *)
+Inductive init_all : list topLvl -> world -> list (option stmt) -> list (option stmt) -> Prop :=
+| IA_Nil :
+    init_all nil nil nil nil
+| IA_Cons : forall t ts cs w r rs p ps,
+    init empty_cs t cs r p ->
+    init_all ts w rs ps ->
+    init_all (t :: ts) (cs :: w) (r :: rs) (p :: ps).
+
+
+(*  Execution of a program (small-step)
+    A configuration is the state of all classes, the code currently running,
+    and the number of process frames still to run. The process bodies never
+    change, so they are a parameter of the relation. *)
+  (*------------------------PROGRAM EVALUATION------------------------------------------------*)
 Record config := {
-    c_state : class_state; (*State of the class*)
-    c_code : stmt;         (*Code currently running (pass when idle)*)
-    c_frames : nat         (*Number of process frames still to run*)
+    c_world : world;   (*State of all classes*)
+    c_code : stmt;     (*Code currently running (pass when idle)*)
+    c_frames : nat     (*Number of process frames still to run*)
     }.
 
 Definition body_or_pass (o : option stmt) : stmt :=
   match o with Some s => s | None => pass end.
 
-Inductive pstep (process : option stmt) : config -> config -> Prop :=
-(* The running code takes one step. All top-level code runs inside a frame,
-   so the outer local store stays empty. *)
-| P_Step : forall cs s cs' s' n,
-    step cs empty s cs' empty s' ->
-    pstep process {| c_state := cs; c_code := s; c_frames := n |}
-                  {| c_state := cs'; c_code := s'; c_frames := n |}
-(* The current code is finished: start the next process frame
-   (an empty frame if the class has no process) *)
-| P_NextFrame : forall cs n,
-    pstep process {| c_state := cs; c_code := pass; c_frames := S n |}
-                  {| c_state := cs; c_code := frame empty (body_or_pass process); c_frames := n |}.
+(* frame i empty b_i ; frame (i+1) empty b_(i+1) ; ... ; pass
+   Used for all the readys, then for all the processes of one frame,
+   in the order of the classes. A class without ready / process gets an
+   empty frame. *)
+Fixpoint class_frames (i : nat) (bodies : list (option stmt)) : stmt :=
+  match bodies with
+  | [] => pass
+  | b :: bs => sequence (frame i empty (body_or_pass b)) (class_frames (S i) bs)
+  end.
 
-Inductive pmulti (process : option stmt) : config -> config -> Prop :=
-| PM_Refl : forall c, pmulti process c c
+Inductive pstep (processes : list (option stmt)) : config -> config -> Prop :=
+(* The running code takes one step. All top-level code runs inside frames,
+   which set their own class, so the outer class index (0) and the outer
+   local store (empty) are never used. *)
+| P_Step : forall w s w' s' n,
+    step w 0 empty s w' empty s' ->
+    pstep processes {| c_world := w; c_code := s; c_frames := n |}
+                    {| c_world := w'; c_code := s'; c_frames := n |}
+(* The current code is finished: start the next frame, which runs the
+   process of each class in order *)
+| P_NextFrame : forall w n,
+    pstep processes {| c_world := w; c_code := pass; c_frames := S n |}
+                    {| c_world := w; c_code := class_frames 0 processes; c_frames := n |}.
+
+Inductive pmulti (processes : list (option stmt)) : config -> config -> Prop :=
+| PM_Refl : forall c, pmulti processes c c
 | PM_Step : forall c c' c'',
-    pstep process c c' -> pmulti process c' c'' -> pmulti process c c''.
+    pstep processes c c' -> pmulti processes c' c'' -> pmulti processes c c''.
 
-(* Whole class: initialization, then ready, then n process frames.
-   The class has finished when its code is pass and no frame is left. *)
-Inductive eval_class : nat -> topLvl -> class_state -> Prop :=
-| Eval : forall n t cs cs' ready process,
-    init empty_cs t cs ready process ->
-    pmulti process {| c_state := cs; c_code := frame empty (body_or_pass ready); c_frames := n |}
-                   {| c_state := cs'; c_code := pass; c_frames := 0 |} ->
-    eval_class n t cs'.
+(* Whole program: all initializations, then all readys, then n frames, each
+   running all the processes, always in the order of the classes.
+   The program has finished when its code is pass and no frame is left. *)
+Inductive eval_program : nat -> list topLvl -> world -> Prop :=
+| Eval : forall n ts w w' readys processes,
+    init_all ts w readys processes ->
+    pmulti processes {| c_world := w; c_code := class_frames 0 readys; c_frames := n |}
+                     {| c_world := w'; c_code := pass; c_frames := 0 |} ->
+    eval_program n ts w'.

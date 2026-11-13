@@ -3,9 +3,7 @@ Import ListNotations.
 Require Import Valuation GDS_Inductive.
 Open Scope list_scope.
 
-(* ================================================================== *)
-(*  Executable evaluation of expressions (used to run examples)       *)
-(* ================================================================== *)
+(*  Executable evaluation of expressions (used to run examples) *)
 
 Fixpoint eval_e (cs : class_state) (val : valuation) (e : expr) : option value :=
   match e with
@@ -60,9 +58,7 @@ Qed.
 
 
 
-(* ================================================================== *)
-(*  Tactics to run examples                                           *)
-(* ================================================================== *)
+(*  Tactics to run examples *)
 
 Ltac solve_premise :=
   match goal with
@@ -75,45 +71,50 @@ Ltac solve_premise :=
 Ltac sstep :=
   match goal with
   (* statement built by a function (e.g. waiting_frames): compute its head first *)
-  | |- step ?c ?v ?s ?c' ?v' ?s' =>
+  | |- step ?w ?c ?v ?s ?w' ?v' ?s' =>
       let h := eval hnf in s in
-      tryif constr_eq h s then fail else (change (step c v h c' v' s'); sstep)
-  | |- step _ _ (sequence pass _) _ _ _ => apply S_SeqPass
-  | |- step _ _ (sequence _ _) _ _ _ => eapply S_Seq; sstep
-  | |- step _ _ (frame _ pass) _ _ _ => apply S_FrameDone
-  | |- step _ _ (frame _ _) _ _ _ =>
-      first [ eapply S_FrameAwait; reflexivity | eapply S_Frame; sstep ]
-  | |- step _ _ (retFrame _ _ _ pass) _ _ _ => eapply S_RetDone; reflexivity
-  | |- step _ _ (retFrame _ _ _ _) _ _ _ => eapply S_RetFrame; sstep
-  | |- step _ _ (assign _ _) _ _ _ =>
+      tryif constr_eq h s then fail else (change (step w c v h w' v' s'); sstep)
+  | |- step _ _ _ (sequence pass _) _ _ _ => apply S_SeqPass
+  | |- step _ _ _ (sequence _ _) _ _ _ => eapply S_Seq; sstep
+  | |- step _ _ _ (frame _ _ pass) _ _ _ => apply S_FrameDone
+  | |- step _ _ _ (frame _ _ _) _ _ _ =>
+      first [ eapply S_FrameAwait; solve_premise | eapply S_Frame; sstep ]
+  | |- step _ _ _ (retFrame _ _ _ pass) _ _ _ => eapply S_RetDone; reflexivity
+  | |- step _ _ _ (retFrame _ _ _ _) _ _ _ => eapply S_RetFrame; sstep
+  | |- step _ _ _ (assign _ _) _ _ _ =>
       first [ eapply S_AssignL; solve_premise | eapply S_AssignG; solve_premise ]
-  | |- step _ _ (ifThenElse _ _ _) _ _ _ =>
+  | |- step _ _ _ (ifThenElse _ _ _) _ _ _ =>
       first [ eapply S_IfT; solve_premise | eapply S_IfF; solve_premise ]
-  | |- step _ _ (whileLoop _ _) _ _ _ =>
+  | |- step _ _ _ (whileLoop _ _) _ _ _ =>
       first [ eapply S_WhileF; solve_premise | eapply S_WhileT; solve_premise ]
-  | |- step _ _ _ _ _ _ => econstructor; solve_premise
+  | |- step _ _ _ _ _ _ _ => econstructor; solve_premise
   end.
 
 (* Steps until no rule applies (loops forever on a diverging program) *)
 Ltac run := repeat (eapply M_Step; [sstep |]); apply M_Refl.
 
 
-
-
-
-(* ================================================================== *)
-(*  Tactics to run whole classes                                      *)
-(* ================================================================== *)
+(*  Tactics to run whole programs *)
 
 Ltac init_run :=
   match goal with
+  (* declarations given by a name (Definition): unfold it first *)
+  | |- init ?cs ?t ?cs' ?r ?p =>
+      let h := eval hnf in t in
+      tryif constr_eq h t then fail else (change (init cs h cs' r p); init_run)
   | |- init _ (sequenceTop _ _) _ _ _ =>
       eapply I_Seq; [init_run | init_run | reflexivity | reflexivity]
   | |- init _ _ _ _ _ => econstructor; solve_premise
   end.
 
+Ltac init_all_run :=
+  match goal with
+  | |- init_all nil _ _ _ => apply IA_Nil
+  | |- init_all (_ :: _) _ _ _ => eapply IA_Cons; [init_run | init_all_run]
+  end.
+
 Ltac pstep_run :=
   first [ eapply P_Step; sstep | apply P_NextFrame ].
 
-Ltac class_run :=
-  eapply Eval; [ init_run | repeat (eapply PM_Step; [pstep_run |]); apply PM_Refl ].
+Ltac program_run :=
+  eapply Eval; [ init_all_run | repeat (eapply PM_Step; [pstep_run |]); apply PM_Refl ].
