@@ -2,3 +2,4 @@ GDS_Inductive.v
 Valuation.v
 GDS_Solving.v
 GDS_Examples.v
+Type_System.v
