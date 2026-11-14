@@ -11,7 +11,7 @@ Definition meth_ret := option (string * typ).
 (* Γ *)
 Definition local_c := partial_map typ.
 
-(* Σ *)
+(* Λ *)
 Record global_c := {
     varsc_store: partial_map typ; (*Variables type*)
     methc_store: partial_map (list typ * meth_ret); (*Method type and return (meth_ret)*)
