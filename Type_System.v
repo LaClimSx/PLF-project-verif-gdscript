@@ -43,8 +43,50 @@ Definition update_sigc_store (gc: global_c) (name: string) (params: list typ) : 
   |}.
 
 
-(* Value typing
+(* Value typing *)
 Inductive value_typing : value -> typ -> Prop:=
-    |VNat: n -> TNat
-    |VBool: b -> TBool
-. *)
+  |VNat: forall n, value_typing (Nat n) TNat
+  |VBool: forall b, value_typing (Bool b) TBool
+.
+
+Inductive optype: BinopName -> typ -> typ -> typ -> Prop :=
+  | Op_LogAnd : optype LogAnd TNat TNat TNat
+  | Op_EqNat: optype Eq TNat TNat TBool
+  | Op_EqBool: optype Eq TBool TBool TBool
+  | Op_ShiftLeft: optype ShiftLeft TNat TNat TNat
+  | Op_ShiftRight: optype ShiftRight TNat TNat TNat 
+  | Op_Times: optype Times TNat TNat TNat 
+  | Op_Divide: optype Divide TNat TNat TNat 
+  | Op_Plus: optype Plus TNat TNat TNat  
+  | Op_Minus: optype Minus TNat TNat TNat  
+  | Op_Modulo: optype Modulo TNat TNat TNat 
+  .
+
+(* Link optype and interp_binop *)
+Lemma op_requirement :
+  forall (op: BinopName) (t1 t2 t: typ) v1 v2,
+  optype op t1 t2 t -> value_typing v1 t1 -> value_typing v2 t2 
+  -> exists v, interp_binop op v1 v2 = Some v /\ value_typing v t
+.
+Proof.
+  intros.
+  inversion H; subst; inversion H0; inversion H1; subst.
+  all: eexists; split; try reflexivity; try constructor.
+Qed.
+
+  
+Inductive expr_typ: global_c -> local_c -> expr -> typ -> Prop :=
+  |TNatRule: forall gc lc n, expr_typ gc lc (nConst n) TNat
+  |TBoolRule: forall gc lc b, expr_typ gc lc (bConst b) TBool
+  |TVarLRule: forall gc lc x t, lc x = Some t -> expr_typ gc lc (Var x) t
+  |TVarGRule: forall gc lc x t, lc x = None -> varsc_store gc x = Some t
+      -> expr_typ gc lc (Var x) t
+  |TBinopRule: forall gc lc b e1 e2 t1 t2 t,
+      expr_typ gc lc e1 t1 ->
+      expr_typ gc lc e2 t2 ->
+      optype b t1 t2 t ->
+      expr_typ gc lc (Binop b e1 e2) t
+.
+  
+  
+  
