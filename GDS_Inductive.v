@@ -5,6 +5,11 @@ Import ListNotations.
 Require Import Valuation.
 Open Scope list_scope. (* Valuation opens string_scope, whose ++ would shadow the list one *)
 
+(*Types and contexts*)
+Inductive typ := TNat | TBool.
+
+(* rho in PDF = return variable name and its type *)
+Definition meth_ret := option (string * typ).
 
 Inductive BinopName :=
 | LogAnd 
