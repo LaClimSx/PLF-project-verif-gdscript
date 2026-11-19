@@ -5,6 +5,11 @@ Import ListNotations.
 Require Import Valuation.
 Open Scope list_scope. (* Valuation opens string_scope, whose ++ would shadow the list one *)
 
+(* Types *)
+Inductive typ := TNat | TBool.
+
+(* rho in type PDF = return variable name and its type *)
+Definition meth_ret := option (string * typ).
 
 Inductive BinopName :=
 | LogAnd 
@@ -78,8 +83,8 @@ Inductive stmt :=
 Inductive topLvl :=
 | skip: topLvl
 | classVarDecl: string -> expr -> topLvl (*Var name, value*)
-| signalDecl : string -> list string -> topLvl (*Signal name, List of argument names*)
-| methodDecl : string -> list string -> option string -> stmt -> topLvl (*Method name, arg names, optional return var name, body*)
+| signalDecl : string -> list (string * typ) -> topLvl (*Signal name, typed argument names*)
+| methodDecl : string -> list (string * typ) -> meth_ret -> stmt -> topLvl (*Method name, typed arg names, optional typed return var, body*)
 | readyDecl : stmt -> topLvl (*Body*)
 | processDecl : stmt -> topLvl (*Body*)
 | sequenceTop : topLvl -> topLvl -> topLvl (*t1; t2*) 
@@ -150,18 +155,18 @@ Notation "'skip'" := skip (in custom gds_top at level 0) : gds_scope.
 Notation "'var' x ':=' e" := (classVarDecl x e)
   (in custom gds_top at level 0, x constr at level 0, e custom gds at level 85, no associativity) : gds_scope.
  
-Notation "'signal' sig ()" := (signalDecl sig (@nil string))
+Notation "'signal' sig ()" := (signalDecl sig (@nil (string * typ)))
   (in custom gds_top at level 0, sig constr at level 0) : gds_scope.
-Notation "'signal' sig ( a , .. , b )" := (signalDecl sig (@cons string a .. (@cons string b nil) ..))
+Notation "'signal' sig ( a , .. , b )" := (signalDecl sig (@cons (string * typ)a .. (@cons (string * typ)b nil) ..))
   (in custom gds_top at level 0, sig constr at level 0, a constr at level 0, b constr at level 0) : gds_scope.
  
-Notation "'func' m () 'do' s 'end'" := (methodDecl m (@nil string) None s)
+Notation "'func' m () 'do' s 'end'" := (methodDecl m (@nil (string * typ)) None s)
   (in custom gds_top at level 0, m constr at level 0, s custom gds at level 99) : gds_scope.
-Notation "'func' m ( a , .. , b ) 'do' s 'end'" := (methodDecl m (@cons string a .. (@cons string b nil) ..) None s)
+Notation "'func' m ( a , .. , b ) 'do' s 'end'" := (methodDecl m (@cons (string * typ)a .. (@cons (string * typ)b nil) ..) None s)
   (in custom gds_top at level 0, m constr at level 0, a constr at level 0, b constr at level 0, s custom gds at level 99) : gds_scope.
-Notation "'func' m () '->' r 'do' s 'end'" := (methodDecl m (@nil string) (Some r) s)
+Notation "'func' m () '->' r 'do' s 'end'" := (methodDecl m (@nil (string * typ)) (Some r) s)
   (in custom gds_top at level 0, m constr at level 0, r constr at level 0, s custom gds at level 99) : gds_scope.
-Notation "'func' m ( a , .. , b ) '->' r 'do' s 'end'" := (methodDecl m (@cons string a .. (@cons string b nil) ..) (Some r) s)
+Notation "'func' m ( a , .. , b ) '->' r 'do' s 'end'" := (methodDecl m (@cons (string * typ)a .. (@cons (string * typ)b nil) ..) (Some r) s)
   (in custom gds_top at level 0, m constr at level 0, a constr at level 0, b constr at level 0, r constr at level 0, s custom gds at level 99) : gds_scope.
  
 Notation "'ready' 'do' s 'end'" := (readyDecl s)
